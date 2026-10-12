@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>SCADA Telemetría Eléctrica - HMI ISA-101</title>
+  <!-- Cliente MQTT sobre WebSockets -->
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  <style>
+    :root {
+      --bg-panel: #202428;
+      --bg-card: #2b3036;
+      --border-card: #3a424b;
+      --text-main: #e2e8f0;
+      --text-muted: #94a3b8;
+      --accent-normal: #38bdf8;
+      --accent-warn: #f59e0b;
+      --accent-energy: #10b981;
+    }
+    body {
+      margin: 0; padding: 20px; background-color: var(--bg-panel);
+      color: var(--text-main); font-family: 'Consolas', 'Segoe UI', monospace;
+    }
+    header {
+      display: flex; justify-content: space-between; align-items: center;
+      border-bottom: 2px solid var(--border-card); padding-bottom: 12px; margin-bottom: 20px;
+    }
+    h1 { margin: 0; font-size: 1.25rem; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; }
+    .status-badge {
+      padding: 4px 10px; border-radius: 4px; font-size: 0.8rem; font-weight: bold; background: #374151; color: #9ca3af;
+    }
+    .status-badge.online { background: #065f46; color: #34d399; }
+
+    .grid-kpi {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 15px; margin-bottom: 20px;
+    }
+    .card {
+      background: var(--bg-card); border: 1px solid var(--border-card);
+      border-radius: 4px; padding: 15px; position: relative;
+    }
+    .card .tag { font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; margin-bottom: 5px; }
+    .card .val { font-size: 1.8rem; font-weight: bold; color: var(--text-main); }
+    .card .unit { font-size: 0.85rem; color: var(--text-muted); margin-left: 4px; }
+
+    .grid-charts {
+      display: grid; grid-template-columns: 2fr 1fr; gap: 15px;
+    }
+    @media (max-width: 900px) { .grid-charts { grid-template-columns: 1fr; } }
+    .chart-panel {
+      background: var(--bg-card); border: 1px solid var(--border-card);
+      border-radius: 4px; padding: 15px;
+    }
+    canvas { width: 100%; height: 220px; background: #1a1d20; display: block; }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div>
+      <h1>Subestación Monitoreo - Canal 01</h1>
+      <small style="color:var(--text-muted);">Nodo: ESP32-PZEM004T | Protocolo: MQTT/WSS</small>
+    </div>
+    <div id="conn-status" class="status-badge">DESCONECTADO</div>
+  </header>
+
+  <div class="grid-kpi">
+    <div class="card">
+      <div class="tag">Voltaje (V_RMS)</div>
+      <div><span class="val" id="v">--</span><span class="unit">V</span></div>
+    </div>
+    <div class="card" style="border-left: 4px solid var(--accent-warn);">
+      <div class="tag">Corriente (I_RMS)</div>
+      <div><span class="val" id="i" style="color:var(--accent-warn);">--</span><span class="unit">A</span></div>
+    </div>
+    <div class="card">
+      <div class="tag">Potencia Activa</div>
+      <div><span class="val" id="p">--</span><span class="unit">W</span></div>
+    </div>
+    <div class="card" style="border-left: 4px solid var(--accent-energy);">
+      <div class="tag">Energía Total</div>
+      <div><span class="val" id="e" style="color:var(--accent-energy);">--</span><span class="unit">kWh</span></div>
+    </div>
+    <div class="card">
+      <div class="tag">Frecuencia</div>
+      <div><span class="val" id="hz">--</span><span class="unit">Hz</span></div>
+    </div>
+    <div class="card">
+      <div class="tag">Factor Potencia</div>
+      <div><span class="val" id="pf">--</span><span class="unit">FP</span></div>
+    </div>
+  </div>
+
+  <div class="grid-charts">
+    <div class="chart-panel">
+      <div style="font-size:0.85rem; margin-bottom:8px; color:var(--text-muted);">TENDENCIA DE CORRIENTE (1 Hz en vivo)</div>
+      <canvas id="chartI"></canvas>
+    </div>
+    <div class="chart-panel">
+      <div style="font-size:0.85rem; margin-bottom:8px; color:var(--text-muted);">PERFIL DE CONSUMO (kWh)</div>
+      <canvas id="chartE"></canvas>
+    </div>
+  </div>
+
+  <script>
+    // Conexión WebSockets segura al broker MQTT
+    const client = mqtt.connect('wss://broker.emqx.io:8084/mqtt', {
+      clientId: 'scada_client_' + Math.random().toString(16).substr(2, 8),
+      clean: true
+    });
+
+    const topic = "scada/joe_pzem_planta/datos";
+    const statusBadge = document.getElementById('conn-status');
+
+    client.on('connect', () => {
+      statusBadge.innerText = "SISTEMA EN LÍNEA";
+      statusBadge.classList.add('online');
+      client.subscribe(topic);
+    });
+
+    client.on('offline', () => {
+      statusBadge.innerText = "DESCONECTADO";
+      statusBadge.classList.remove('online');
+    });
+
+    // Gráficas nativas
+    const cvsI = document.getElementById('chartI');
+    const cvsE = document.getElementById('chartE');
+    const ctxI = cvsI.getContext('2d');
+    const ctxE = cvsE.getContext('2d');
+
+    function resize() {
+      cvsI.width = cvsI.clientWidth * 2; cvsI.height = cvsI.clientHeight * 2;
+      cvsE.width = cvsE.clientWidth * 2; cvsE.height = cvsE.clientHeight * 2;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    let histI = [], histE = [];
+    const maxData = 40;
+
+    function renderTrend(ctx, data, strokeColor, fillColor) {
+      const w = ctx.canvas.width, h = ctx.canvas.height;
+      ctx.clearRect(0, 0, w, h);
+
+      // Grid SCADA
+      ctx.strokeStyle = '#2b3036';
+      ctx.lineWidth = 1;
+      for (let y = 0; y < h; y += h / 5) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+      }
+
+      if (data.length < 2) return;
+      let min = Math.min(...data), max = Math.max(...data);
+      if (min === max) { max += 1; min = Math.max(0, min - 0.5); }
+      let range = max - min;
+
+      ctx.beginPath();
+      for (let idx = 0; idx < data.length; idx++) {
+        const x = (idx / (maxData - 1)) * w;
+        const y = h - (((data[idx] - min) / range) * (h - 40) + 20);
+        if (idx === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.strokeStyle = strokeColor;
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+
+      ctx.lineTo(((data.length - 1) / (maxData - 1)) * w, h);
+      ctx.lineTo(0, h);
+      ctx.fillStyle = fillColor;
+      ctx.fill();
+    }
+
+    client.on('message', (t, msg) => {
+      const d = JSON.parse(msg.toString());
+      document.getElementById('v').innerText  = d.v.toFixed(1);
+      document.getElementById('i').innerText  = d.i.toFixed(3);
+      document.getElementById('p').innerText  = d.p.toFixed(1);
+      document.getElementById('e').innerText  = d.e.toFixed(3);
+      document.getElementById('hz').innerText = d.hz.toFixed(1);
+      document.getElementById('pf').innerText = d.pf.toFixed(2);
+
+      histI.push(d.i); if (histI.length > maxData) histI.shift();
+      renderTrend(ctxI, histI, '#f59e0b', 'rgba(245, 158, 11, 0.1)');
+
+      histE.push(d.e); if (histE.length > maxData) histE.shift();
+      renderTrend(ctxE, histE, '#10b981', 'rgba(16, 185, 129, 0.1)');
+    });
+  </script>
+</body>
+</html>
