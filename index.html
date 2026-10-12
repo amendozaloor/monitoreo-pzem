@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>SCADA Telemetría Eléctrica - HMI ISA-101</title>
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  <style>
+    :root {
+      --bg-main: #181c20;
+      --bg-panel: #22272e;
+      --border-panel: #373e47;
+      --text-main: #e6edf3;
+      --text-muted: #8b949e;
+      --color-v: #38bdf8;
+      --color-i: #f59e0b;
+      --color-p: #ef4444;
+      --color-e: #10b981;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 18px; background-color: var(--bg-main);
+      color: var(--text-main); font-family: 'Consolas', 'Segoe UI', monospace;
+    }
+    header {
+      display: flex; justify-content: space-between; align-items: center;
+      border-bottom: 2px solid var(--border-panel); padding-bottom: 12px; margin-bottom: 16px;
+    }
+    h1 { margin: 0; font-size: 1.25rem; font-weight: 600; letter-spacing: 0.5px; }
+    .status-badge {
+      padding: 5px 12px; border-radius: 4px; font-size: 0.8rem; font-weight: bold; background: #374151; color: #9ca3af;
+    }
+    .status-badge.online { background: #064e3b; color: #34d399; }
+
+    /* Barra del Breaker */
+    .breaker-bar-box {
+      background: var(--bg-panel); border: 1px solid var(--border-panel);
+      padding: 12px 16px; border-radius: 4px; margin-bottom: 16px;
+    }
+    .breaker-header { display: flex; justify-content: space-between; font-size: 0.85rem; margin-bottom: 6px; }
+    .progress-track { background: #121518; height: 14px; border-radius: 3px; overflow: hidden; border: 1px solid #30363d; position: relative; }
+    .progress-fill { height: 100%; width: 0%; background: var(--color-i); transition: width 0.3s; }
+
+    /* Tarjetas KPI */
+    .grid-kpi {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 12px; margin-bottom: 16px;
+    }
+    .card {
+      background: var(--bg-panel); border: 1px solid var(--border-panel);
+      border-radius: 4px; padding: 12px;
+    }
+    .card .tag { font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; margin-bottom: 4px; }
+    .card .val { font-size: 1.7rem; font-weight: bold; }
+    .card .unit { font-size: 0.8rem; color: var(--text-muted); margin-left: 4px; }
+
+    /* Gráficas */
+    .grid-charts {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
+    }
+    @media (max-width: 950px) { .grid-charts { grid-template-columns: 1fr; } }
+    .chart-panel {
+      background: var(--bg-panel); border: 1px solid var(--border-panel);
+      border-radius: 4px; padding: 14px;
+    }
+    .chart-title { font-size: 0.85rem; font-weight: bold; margin-bottom: 8px; display: flex; justify-content: space-between; }
+    canvas { width: 100%; height: 260px; background: #121518; border-radius: 4px; display: block; }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div>
+      <h1>SUBESTACIÓN MONITOREO - TABLERO PRINCIPAL</h1>
+      <small style="color:var(--text-muted);">Nodo: ESP32-PZEM004T | Capacidad Protección: 40 A RMS</small>
+    </div>
+    <div id="conn-status" class="status-badge">DESCONECTADO</div>
+  </header>
+
+  <!-- Barra de Carga Térmica del Breaker -->
+  <div class="breaker-bar-box">
+    <div class="breaker-header">
+      <span>CARGA DE CAPACIDAD DEL BREAKER (40 A)</span>
+      <span id="breaker-text" style="font-weight:bold; color:var(--color-i);">0.00 A / 40.00 A (0.0%)</span>
+    </div>
+    <div class="progress-track">
+      <div id="breaker-fill" class="progress-fill"></div>
+    </div>
+  </div>
+
+  <!-- Cuadrícula de Variables Eléctricas -->
+  <div class="grid-kpi">
+    <div class="card" style="border-top: 3px solid var(--color-v);">
+      <div class="tag">Voltaje (V_RMS)</div>
+      <div><span class="val" id="v" style="color:var(--color-v);">--</span><span class="unit">V</span></div>
+    </div>
+    <div class="card" style="border-top: 3px solid var(--color-i);">
+      <div class="tag">Corriente (I_RMS)</div>
+      <div><span class="val" id="i" style="color:var(--color-i);">--</span><span class="unit">A</span></div>
+    </div>
+    <div class="card" style="border-top: 3px solid var(--color-p);">
+      <div class="tag">Potencia Activa</div>
+      <div><span class="val" id="p" style="color:var(--color-p);">--</span><span class="unit">W</span></div>
+    </div>
+    <div class="card" style="border-top: 3px solid var(--color-e);">
+      <div class="tag">Energía Total</div>
+      <div><span class="val" id="e" style="color:var(--color-e);">--</span><span class="unit">kWh</span></div>
+    </div>
+    <div class="card">
+      <div class="tag">Consumo Sesión</div>
+      <div><span class="val" id="e_session" style="color:#6ee7b7;">0.000</span><span class="unit">kWh</span></div>
+    </div>
+    <div class="card">
+      <div class="tag">Frecuencia / FP</div>
+      <div><span class="val" id="hz_pf" style="font-size:1.3rem;">-- / --</span></div>
+    </div>
+  </div>
+
+  <!-- Gráficas con Escalas Cartografías Reales -->
+  <div class="grid-charts">
+    <div class="chart-panel">
+      <div class="chart-title">
+        <span style="color:var(--color-i);">CORRIENTE EN TIEMPO REAL (Escala Fija: Breaker 0-40 A)</span>
+        <span id="cur-i-tag" style="color:var(--text-muted);">-- A</span>
+      </div>
+      <canvas id="chartI"></canvas>
+    </div>
+    <div class="chart-panel">
+      <div class="chart-title">
+        <span style="color:var(--color-p);">POTENCIA ACTIVA DINÁMICA (W)</span>
+        <span id="cur-p-tag" style="color:var(--text-muted);">-- W</span>
+      </div>
+      <canvas id="chartP"></canvas>
+    </div>
+  </div>
+
+  <script>
+    // Ajuste Retina Display / Alta Resolución para Canvas
+    function setupCanvas(canvas) {
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      const ctx = canvas.getContext('2d');
+      ctx.scale(dpr, dpr);
+      return { ctx, width: rect.width, height: rect.height };
+    }
+
+    const cvsI = document.getElementById('chartI');
+    const cvsP = document.getElementById('chartP');
+    let viewI = setupCanvas(cvsI);
+    let viewP = setupCanvas(cvsP);
+
+    window.addEventListener('resize', () => {
+      viewI = setupCanvas(cvsI);
+      viewP = setupCanvas(cvsP);
+    });
+
+    const MAX_PUNTOS = 35; // Ventana de ~35 segundos en pantalla
+    let bufferI = [];
+    let bufferP = [];
+    let initialEnergy = null;
+
+    // Conexión WebSockets MQTT
+    const client = mqtt.connect('wss://broker.emqx.io:8084/mqtt', {
+      clientId: 'scada_' + Math.random().toString(16).substr(2, 8),
+      clean: true
+    });
+    const topic = "scada/joe_pzem_planta/datos";
+
+    client.on('connect', () => {
+      document.getElementById('conn-status').innerText = "SISTEMA EN LÍNEA";
+      document.getElementById('conn-status').classList.add('online');
+      client.subscribe(topic);
+    });
+
+    client.on('offline', () => {
+      document.getElementById('conn-status').innerText = "DESCONECTADO";
+      document.getElementById('conn-status').classList.remove('online');
+    });
+
+    // Función de Dibujo con Escala Fija (0 a 40A)
+    function drawCurrentChart(ctx, w, h, data) {
+      ctx.clearRect(0, 0, w, h);
+      const padL = 40, padR = 15, padT = 15, padB = 25;
+      const plotW = w - padL - padR;
+      const plotH = h - padT - padB;
+      const yMax = 40; // Breaker de 40A
+
+      // Eje Y y Cuadrícula (Tramos de 10 en 10 A)
+      ctx.lineWidth = 1;
+      ctx.font = "11px Consolas, monospace";
+      ctx.textAlign = "right";
+
+      for (let amp = 0; amp <= yMax; amp += 10) {
+        const y = padT + plotH - (amp / yMax) * plotH;
+        ctx.strokeStyle = '#252b33';
+        ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(w - padR, y); ctx.stroke();
+
+        ctx.fillStyle = '#8b949e';
+        ctx.fillText(amp + "A", padL - 8, y + 4);
+      }
+
+      // Línea de seguridad al 80% (32 A)
+      const ySafe = padT + plotH - (32 / yMax) * plotH;
+      ctx.strokeStyle = 'rgba(239, 68, 68, 0.4)';
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath(); ctx.moveTo(padL, ySafe); ctx.lineTo(w - padR, ySafe); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(239, 68, 68, 0.6)';
+      ctx.fillText("80% (32A)", w - padR - 5, ySafe - 4);
+
+      if (data.length < 2) return;
+
+      // Trazo de los datos
+      ctx.beginPath();
+      for (let i = 0; i < data.length; i++) {
+        const x = padL + (i / (MAX_PUNTOS - 1)) * plotW;
+        const val = Math.min(yMax, Math.max(0, data[i].val));
+        const y = padT + plotH - (val / yMax) * plotH;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.strokeStyle = '#f59e0b';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      // Relleno suave
+      const lastX = padL + ((data.length - 1) / (MAX_PUNTOS - 1)) * plotW;
+      ctx.lineTo(lastX, padT + plotH);
+      ctx.lineTo(padL, padT + plotH);
+      ctx.fillStyle = 'rgba(245, 158, 11, 0.12)';
+      ctx.fill();
+
+      // Ticks de tiempo en el eje X
+      ctx.fillStyle = '#8b949e';
+      ctx.textAlign = "center";
+      if (data.length > 0) {
+        ctx.fillText(data[0].time, padL + 15, h - 8);
+        ctx.fillText(data[data.length - 1].time, lastX - 15, h - 8);
+      }
+    }
+
+    // Función de Dibujo de Potencia Dinámica (W)
+    function drawPowerChart(ctx, w, h, data) {
+      ctx.clearRect(0, 0, w, h);
+      const padL = 50, padR = 15, padT = 15, padB = 25;
+      const plotW = w - padL - padR;
+      const plotH = h - padT - padB;
+
+      let maxP = 100;
+      data.forEach(d => { if (d.val > maxP) maxP = d.val; });
+      maxP = Math.ceil(maxP * 1.25 / 50) * 50; // Techo redondeado
+
+      ctx.lineWidth = 1;
+      ctx.font = "11px Consolas, monospace";
+      ctx.textAlign = "right";
+
+      const step = maxP / 4;
+      for (let p = 0; p <= maxP; p += step) {
+        const y = padT + plotH - (p / maxP) * plotH;
+        ctx.strokeStyle = '#252b33';
+        ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(w - padR, y); ctx.stroke();
+
+        ctx.fillStyle = '#8b949e';
+        ctx.fillText(Math.round(p) + "W", padL - 8, y + 4);
+      }
+
+      if (data.length < 2) return;
+
+      ctx.beginPath();
+      for (let i = 0; i < data.length; i++) {
+        const x = padL + (i / (MAX_PUNTOS - 1)) * plotW;
+        const y = padT + plotH - (data[i].val / maxP) * plotH;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.strokeStyle = '#ef4444';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      const lastX = padL + ((data.length - 1) / (MAX_PUNTOS - 1)) * plotW;
+      ctx.lineTo(lastX, padT + plotH);
+      ctx.lineTo(padL, padT + plotH);
+      ctx.fillStyle = 'rgba(239, 68, 68, 0.12)';
+      ctx.fill();
+
+      ctx.fillStyle = '#8b949e';
+      ctx.textAlign = "center";
+      if (data.length > 0) {
+        ctx.fillText(data[0].time, padL + 15, h - 8);
+        ctx.fillText(data[data.length - 1].time, lastX - 15, h - 8);
+      }
+    }
+
+    client.on('message', (t, msg) => {
+      const d = JSON.parse(msg.toString());
+      const now = new Date().toLocaleTimeString();
+
+      // Control de Energía de Sesión
+      if (initialEnergy === null && d.e > 0) initialEnergy = d.e;
+      const sessionE = initialEnergy !== null ? Math.max(0, d.e - initialEnergy) : 0;
+
+      // Tarjetas numéricas
+      document.getElementById('v').innerText = d.v.toFixed(1);
+      document.getElementById('i').innerText = d.i.toFixed(3);
+      document.getElementById('p').innerText = d.p.toFixed(1);
+      document.getElementById('e').innerText = d.e.toFixed(3);
+      document.getElementById('e_session').innerText = sessionE.toFixed(3);
+      document.getElementById('hz_pf').innerText = `${d.hz.toFixed(1)}Hz | ${d.pf.toFixed(2)}`;
+
+      document.getElementById('cur-i-tag').innerText = d.i.toFixed(3) + " A";
+      document.getElementById('cur-p-tag').innerText = d.p.toFixed(1) + " W";
+
+      // Barra del Breaker (40A)
+      const pct = Math.min(100, (d.i / 40.0) * 100);
+      document.getElementById('breaker-fill').style.width = pct + "%";
+      document.getElementById('breaker-text').innerText = `${d.i.toFixed(2)} A / 40.00 A (${pct.toFixed(1)}%)`;
+
+      if (pct > 80) {
+        document.getElementById('breaker-fill').style.background = '#ef4444';
+      } else {
+        document.getElementById('breaker-fill').style.background = 'var(--color-i)';
+      }
+
+      // Gráfica de Corriente
+      bufferI.push({ val: d.i, time: now });
+      if (bufferI.length > MAX_PUNTOS) bufferI.shift();
+      drawCurrentChart(viewI.ctx, viewI.width, viewI.height, bufferI);
+
+      // Gráfica de Potencia
+      bufferP.push({ val: d.p, time: now });
+      if (bufferP.length > MAX_PUNTOS) bufferP.shift();
+      drawPowerChart(viewP.ctx, viewP.width, viewP.height, bufferP);
+    });
+  </script>
+</body>
+</html>
